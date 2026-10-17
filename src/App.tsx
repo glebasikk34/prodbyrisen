@@ -880,9 +880,25 @@ function SoundCloudWaveform({
 export default function App() {
   const [user, setUser] = useState(null);
   const [tracks, setTracks] = useState([]);
-  const [profile, setProfile] = useState(DEFAULT_PROFILE);
-  const [runwayItems, setRunwayItems] = useState(DEFAULT_RUNWAY_ITEMS);
+  const [profile, setProfile] = useState(() => {
+    try {
+      const saved = localStorage.getItem('risen_profile_v2');
+      if (saved) return { ...DEFAULT_PROFILE, ...JSON.parse(saved) };
+    } catch (_) {}
+    return DEFAULT_PROFILE;
+  });
+  const [runwayItems, setRunwayItems] = useState(() => {
+    try {
+      const saved = localStorage.getItem('risen_runway_v2');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (_) {}
+    return DEFAULT_RUNWAY_ITEMS;
+  });
   const [isLoadingArchive, setIsLoadingArchive] = useState(true);
+
   const [uploadProgressText, setUploadProgressText] = useState('');
 
   const [activeRunwayIndex, setActiveRunwayIndex] = useState(0);
@@ -945,8 +961,15 @@ export default function App() {
   const [isSavingData, setIsSavingData] = useState(false);
 
   // Состояние формы профиля
-  const [profileForm, setProfileForm] = useState(DEFAULT_PROFILE);
+  const [profileForm, setProfileForm] = useState(() => {
+    try {
+      const saved = localStorage.getItem('risen_profile_v2');
+      if (saved) return { ...DEFAULT_PROFILE, ...JSON.parse(saved) };
+    } catch (_) {}
+    return DEFAULT_PROFILE;
+  });
   const [avatarFile, setAvatarFile] = useState(null);
+
 
   // Состояние формы показов мод (Runway Archive: Фото + Видео)
   const [editingRunwayId, setEditingRunwayId] = useState(null);
@@ -1060,14 +1083,46 @@ export default function App() {
           const p = { ...DEFAULT_PROFILE, ...localProfile.value };
           setProfile(p);
           setProfileForm(p);
+          try {
+            localStorage.setItem('risen_profile_v2', JSON.stringify(p));
+          } catch (_) {}
         }
 
-        if (localRunway && localRunway.length >= 6) {
-          setRunwayItems(
-            [...localRunway].sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
-          );
+        if (localRunway && localRunway.length > 0) {
+          const hydratedRunway = localRunway
+            .map((item) => {
+              let liveVideo = item.videoUrl || '';
+              if (item.videoBlob instanceof Blob) {
+                liveVideo = registerObjectUrl(item.videoBlob);
+              }
+              let liveImage = item.imageUrl || '';
+              if (item.imageBlob instanceof Blob) {
+                liveImage = registerObjectUrl(item.imageBlob);
+              }
+              return {
+                ...item,
+                videoUrl: liveVideo,
+                imageUrl: liveImage || DEFAULT_RUNWAY_ITEMS[0].imageUrl
+              };
+            })
+            .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+          setRunwayItems(hydratedRunway);
+          try {
+            localStorage.setItem(
+              'risen_runway_v2',
+              JSON.stringify(hydratedRunway.map(({ videoBlob, imageBlob, ...rest }) => rest))
+            );
+          } catch (_) {}
+        } else {
+          for (let i = 0; i < DEFAULT_RUNWAY_ITEMS.length; i++) {
+            const item = { ...DEFAULT_RUNWAY_ITEMS[i], order: i };
+            await dbPut(STORE_RUNWAY, item);
+          }
         }
-      } catch (_) {}
+      } catch (err) {
+        console.warn('loadLocalCache warning:', err);
+      }
+
     }
 
     loadLocalCache();
@@ -1812,7 +1867,11 @@ export default function App() {
         existing?.videoUrl ||
         (isVideoUrl(runwayForm.imageUrl) ? runwayForm.imageUrl.trim() : '');
 
+      let imageBlob = existing?.imageBlob || null;
+      let videoBlob = existing?.videoBlob || null;
+
       if (runwayForm.imageFile) {
+        imageBlob = runwayForm.imageFile;
         const compressedImg = await compressImageForCloud(
           runwayForm.imageFile,
           1100,
@@ -1826,6 +1885,7 @@ export default function App() {
       }
 
       if (runwayForm.videoFile) {
+        videoBlob = runwayForm.videoFile;
         videoUrl = registerObjectUrl(runwayForm.videoFile);
       }
 
@@ -1845,12 +1905,32 @@ export default function App() {
         description: runwayForm.description.trim(),
         imageUrl,
         videoUrl,
-        order: sortOrder
+        order: sortOrder,
+        ...(videoBlob ? { videoBlob } : {}),
+        ...(imageBlob ? { imageBlob } : {})
       };
 
-      await dbPut(STORE_RUNWAY, cloudRecord);
+      const updatedRunway = runwayItems.some((item) => item.id === id)
+        ? runwayItems.map((item) => (item.id === id ? cloudRecord : item))
+        : [...runwayItems, cloudRecord];
+
+      setRunwayItems(updatedRunway);
+
+      try {
+        localStorage.setItem(
+          'risen_runway_v2',
+          JSON.stringify(updatedRunway.map(({ videoBlob: _v, imageBlob: _i, ...rest }) => rest))
+        );
+      } catch (err) {
+        console.warn('localStorage save warning:', err);
+      }
+
+      for (const item of updatedRunway) {
+        await dbPut(STORE_RUNWAY, item);
+      }
 
       if (db && user) {
+        const { videoBlob: _vb, imageBlob: _ib, ...cloudCleanRecord } = cloudRecord;
         const runwayDocRef = doc(
           db,
           'artifacts',
@@ -1860,20 +1940,12 @@ export default function App() {
           'runway_items',
           id
         );
-        await setDoc(runwayDocRef, cloudRecord);
-      } else {
-        setRunwayItems((prev) => {
-          const exists = prev.some((item) => item.id === id);
-          if (exists) {
-            return prev.map((item) => (item.id === id ? cloudRecord : item));
-          }
-          return [...prev, cloudRecord];
-        });
+        await setDoc(runwayDocRef, cloudCleanRecord).catch(() => {});
       }
 
       setEditingRunwayId(null);
       setRunwayForm({
-        code: `TAPE-0${runwayItems.length + 2} // PARIS`,
+        code: `TAPE-0${updatedRunway.length + 1} // PARIS`,
         house: '',
         season: '',
         mediaType: 'image',
@@ -1885,9 +1957,10 @@ export default function App() {
       });
 
       triggerSecurityAlert(
-        'КАРТОЧКА ПОКАЗА ОБНОВЛЕНА ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ САЙТА'
+        'КАРТОЧКА ПОКАЗА УСПЕШНО СОХРАНЕНА'
       );
     } catch (err) {
+      console.error('Save runway error:', err);
       triggerSecurityAlert(`ОШИБКА: ${err.message}`);
     } finally {
       setIsSavingData(false);
@@ -1900,6 +1973,15 @@ export default function App() {
       return;
     }
     await dbDelete(STORE_RUNWAY, id);
+    const updated = runwayItems.filter((item) => item.id !== id);
+    setRunwayItems(updated);
+    try {
+      localStorage.setItem(
+        'risen_runway_v2',
+        JSON.stringify(updated.map(({ videoBlob: _v, imageBlob: _i, ...rest }) => rest))
+      );
+    } catch (_) {}
+
     if (db && user) {
       const runwayDocRef = doc(
         db,
@@ -1911,8 +1993,6 @@ export default function App() {
         id
       );
       await deleteDoc(runwayDocRef).catch(() => {});
-    } else {
-      setRunwayItems((prev) => prev.filter((item) => item.id !== id));
     }
     setActiveRunwayIndex(0);
     triggerSecurityAlert('КАДР УДАЛЕН ИЗ ПАНЕЛИ ПОКАЗОВ');
@@ -1936,12 +2016,16 @@ export default function App() {
         await setDoc(ref, item).catch(() => {});
       }
     }
+    try {
+      localStorage.setItem('risen_runway_v2', JSON.stringify(DEFAULT_RUNWAY_ITEMS));
+    } catch (_) {}
     setRunwayItems(DEFAULT_RUNWAY_ITEMS);
     setActiveRunwayIndex(0);
     triggerSecurityAlert(
       'ВОССТАНОВЛЕНЫ ВСЕ 6 ПЛЕНОК ПОКАЗОВ + ВИДЕО MAISON MARGIELA'
     );
   };
+
 
   const getTelegramLink = (trackTitle = null) => {
     const cleanUser = (profile.telegramUsername || 'risen')
