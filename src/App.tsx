@@ -82,8 +82,9 @@ try {
 }
 
 
-const DB_NAME = 'RisenArchiveMasterDB_v5';
-const DB_VERSION = 5;
+const DB_NAME = 'RisenArchiveMasterDB_v8';
+const DB_VERSION = 1;
+
 const STORE_TRACKS = 'tracks';
 const STORE_SETTINGS = 'settings';
 const STORE_RUNWAY = 'runway';
@@ -1054,12 +1055,11 @@ export default function App() {
     // Сначала мгновенно читаем локальный кэш IndexedDB
     async function loadLocalCache() {
       try {
-        const [localTracks, localProfile, localRunway] = await Promise.all([
-          dbGetAll(STORE_TRACKS),
-          dbGet(STORE_SETTINGS, 'profile'),
-          dbGetAll(STORE_RUNWAY)
-        ]);
+        const localTracks = await dbGetAll(STORE_TRACKS).catch(() => []);
+        const localProfile = await dbGet(STORE_SETTINGS, 'profile').catch(() => null);
+        const localRunway = await dbGetAll(STORE_RUNWAY).catch(() => []);
         if (!isMounted) return;
+
 
         if (localTracks && localTracks.length > 0) {
           const hydrated = localTracks
@@ -1917,13 +1917,15 @@ export default function App() {
       setRunwayItems(updatedRunway);
 
       try {
-        localStorage.setItem(
-          'risen_runway_v2',
-          JSON.stringify(updatedRunway.map(({ videoBlob: _v, imageBlob: _i, ...rest }) => rest))
-        );
+        const cleanForStorage = updatedRunway.map(({ videoBlob: _v, imageBlob: _i, ...rest }) => ({
+          ...rest,
+          imageUrl: rest.imageUrl && rest.imageUrl.length > 50000 ? '' : rest.imageUrl
+        }));
+        localStorage.setItem('risen_runway_v2', JSON.stringify(cleanForStorage));
       } catch (err) {
         console.warn('localStorage save warning:', err);
       }
+
 
       for (const item of updatedRunway) {
         await dbPut(STORE_RUNWAY, item);
